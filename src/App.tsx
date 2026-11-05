@@ -206,8 +206,14 @@ export default function App() {
   const [suppressedTeluguNotice, setSuppressedTeluguNotice] = useState<string | null>(null);
   const [isSendingText, setIsSendingText] = useState(false);
 
-  // Refs for WebSocket and Web Audio API to prevent stale closures
-  const wsRef = useRef<WebSocket | null>(null);
+  // Refs for Live Session and Web Audio API to prevent stale closures
+  const liveSessionIdRef = useRef<string | null>(null);
+  const pollIntervalRef = useRef<number | null>(null);
+  const flushAudioIntervalRef = useRef<number | null>(null);
+  const pendingAudioChunksRef = useRef<string[]>([]);
+  const isPollingRef = useRef<boolean>(false);
+  const isFlushingAudioRef = useRef<boolean>(false);
+
   const inputAudioCtxRef = useRef<AudioContext | null>(null);
   const outputAudioCtxRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -233,6 +239,9 @@ export default function App() {
   useEffect(() => {
     audioBoostRef.current = audioBoost;
   }, [audioBoost]);
+
+  const formatNow = () =>
+    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   const stopAllPlayback = useCallback(() => {
     for (const source of activeSourcesRef.current) {
@@ -315,6 +324,20 @@ export default function App() {
   const cleanupLiveCall = useCallback(() => {
     stopAllPlayback();
 
+    if (pollIntervalRef.current !== null) {
+      window.clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
+    if (flushAudioIntervalRef.current !== null) {
+      window.clearInterval(flushAudioIntervalRef.current);
+      flushAudioIntervalRef.current = null;
+    }
+
+    pendingAudioChunksRef.current = [];
+    isPollingRef.current = false;
+    isFlushingAudioRef.current = false;
+
     if (processorRef.current) {
       try {
         processorRef.current.disconnect();
@@ -332,11 +355,14 @@ export default function App() {
       inputAudioCtxRef.current = null;
     }
 
-    if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {}
-      wsRef.current = null;
+    const activeSessionId = liveSessionIdRef.current;
+    liveSessionIdRef.current = null;
+    if (activeSessionId) {
+      fetch('/api/live/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: activeSessionId }),
+      }).catch(() => {});
     }
 
     setConnectionState('idle');
@@ -351,23 +377,142 @@ export default function App() {
     };
   }, [cleanupLiveCall]);
 
-  const formatNow = () =>
-    new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const processLiveServerEvents = useCallback(
+    (events: Array<Record<string, any>>) => {
+      if (!Array.isArray(events) || events.length === 0) return;
+
+      for (const msg of events) {
+        if (!msg || typeof msg !== 'object') continue;
+
+        if (msg.type === 'ready') {
+          setConnectionState('connected');
+        } else if (msg.type === 'languageGateChanged' && msg.languageGate) {
+          setConfig((prev) => ({ ...prev, languageGate: msg.languageGate }));
+          setSuppressedTeluguNotice(null);
+        } else if (msg.type === 'suppressedAccidentalTelugu') {
+          stopAllPlayback();
+          pendingInputRef.current = '';
+          pendingOutputRef.current = '';
+          pendingModelTextRef.current = '';
+          setLiveInputText('');
+          setLiveOutputText('');
+          setSuppressedTeluguNotice(
+            `Ignored unrequested Telugu speech (“${msg.text || 'Telugu audio'}”) because English-Only Gate is active. Say "talk in Telugu" or click "Ask for Telugu" if you want Aanya to reply in Telugu.`
+          );
+        } else if (msg.type === 'audio' && msg.audio) {
+          playPcm24kChunk(msg.audio);
+        } else if (msg.type === 'inputTranscript' && msg.text) {
+          setSuppressedTeluguNotice(null);
+          pendingInputRef.current += msg.text;
+          setLiveInputText(pendingInputRef.current);
+        } else if (msg.type === 'outputTranscript' && msg.text) {
+          pendingOutputRef.current += msg.text;
+          setLiveOutputText(pendingOutputRef.current);
+        } else if (msg.type === 'modelText' && msg.text) {
+          pendingModelTextRef.current += msg.text;
+        } else if (msg.type === 'interrupted') {
+          stopAllPlayback();
+        } else if (msg.type === 'turnComplete') {
+          const finalUser = pendingInputRef.current.trim();
+          const finalPartner =
+            pendingOutputRef.current.trim() || pendingModelTextRef.current.trim();
+
+          if (finalUser) {
+            lastUserTextRef.current = finalUser;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                speaker: 'user',
+                text: finalUser,
+                timestamp: formatNow(),
+                wordCount: countWords(finalUser),
+                via: 'voice',
+              },
+            ]);
+            setCallRecords((prev) =>
+              prev.map((call, idx) =>
+                idx === 0
+                  ? {
+                      ...call,
+                      userUtterances: [...call.userUtterances, finalUser],
+                      fullTurns: [
+                        ...call.fullTurns,
+                        { speaker: 'user', text: finalUser, timestamp: formatNow() },
+                      ],
+                      totalUserWords: call.totalUserWords + countWords(finalUser),
+                    }
+                  : call
+              )
+            );
+          }
+
+          if (finalPartner) {
+            const metrics = analyzeTurnMirroring(lastUserTextRef.current, finalPartner);
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                speaker: 'partner',
+                text: finalPartner,
+                timestamp: formatNow(),
+                wordCount: countWords(finalPartner),
+                mirrorFit: metrics.fitLabel,
+                via: 'voice',
+              },
+            ]);
+            setCallRecords((prev) =>
+              prev.map((call, idx) =>
+                idx === 0
+                  ? {
+                      ...call,
+                      fullTurns: [
+                        ...call.fullTurns,
+                        { speaker: 'partner', text: finalPartner, timestamp: formatNow() },
+                      ],
+                    }
+                  : call
+              )
+            );
+          }
+
+          pendingInputRef.current = '';
+          pendingOutputRef.current = '';
+          pendingModelTextRef.current = '';
+          setLiveInputText('');
+          setLiveOutputText('');
+        } else if (msg.type === 'error' && msg.message) {
+          setErrorMessage(msg.message);
+        } else if (msg.type === 'closed') {
+          cleanupLiveCall();
+        }
+      }
+    },
+    [cleanupLiveCall, playPcm24kChunk, stopAllPlayback]
+  );
 
   const handleChangeLanguageGate = (nextMode: LanguageGateMode) => {
     setSuppressedTeluguNotice(null);
     setConfig((prev) => ({ ...prev, languageGate: nextMode }));
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'setLanguageGate',
+    if (liveSessionIdRef.current) {
+      fetch('/api/live/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: liveSessionIdRef.current,
           languageGate: nextMode,
+        }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data?.events) processLiveServerEvents(data.events);
         })
-      );
+        .catch(() => {});
     }
   };
 
   const startLiveCall = async () => {
+    cleanupLiveCall();
     setErrorMessage(null);
     setSuppressedTeluguNotice(null);
     setConnectionState('connecting');
@@ -378,23 +523,101 @@ export default function App() {
     setLiveOutputText('');
 
     try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/live?voice=${encodeURIComponent(
-        config.voiceName
-      )}&languageGate=${encodeURIComponent(config.languageGate)}`;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
+      // Pre-warm output AudioContext on user gesture so 24kHz audio plays immediately
+      if (!outputAudioCtxRef.current) {
+        outputAudioCtxRef.current = new AudioContext({ sampleRate: 24000 });
+      }
+      if (outputAudioCtxRef.current.state === 'suspended') {
+        outputAudioCtxRef.current.resume().catch(() => {});
+      }
 
-      ws.onopen = async () => {
-        ws.send(
-          JSON.stringify({
-            type: 'init',
-            voiceName: config.voiceName,
-            languageGate: config.languageGate,
-            systemInstruction: buildCompanionSystemInstruction(config),
-          })
+      const startRes = await fetch('/api/live/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          voiceName: config.voiceName,
+          languageGate: config.languageGate,
+          systemInstruction: buildCompanionSystemInstruction(config),
+        }),
+      });
+
+      const startData = await startRes.json();
+      if (!startRes.ok || !startData.sessionId) {
+        throw new Error(
+          startData.error || 'Could not start Gemini Live session. Please try again.'
         );
+      }
 
+      const sessionId: string = startData.sessionId;
+      liveSessionIdRef.current = sessionId;
+      setConnectionState('connected');
+
+      if (Array.isArray(startData.events)) {
+        processLiveServerEvents(startData.events);
+      }
+
+      // Poll queued Gemini Live audio/transcript events every 110ms
+      pollIntervalRef.current = window.setInterval(async () => {
+        if (!liveSessionIdRef.current || isPollingRef.current) return;
+        isPollingRef.current = true;
+        try {
+          const pollRes = await fetch(
+            `/api/live/events?sessionId=${encodeURIComponent(liveSessionIdRef.current)}`
+          );
+          if (pollRes.status === 404) {
+            cleanupLiveCall();
+            return;
+          }
+          const pollData = await pollRes.json();
+          if (Array.isArray(pollData.events) && pollData.events.length > 0) {
+            processLiveServerEvents(pollData.events);
+          }
+          if (pollData.closed) {
+            cleanupLiveCall();
+          }
+        } catch {
+          // Ignore transient network hiccup
+        } finally {
+          isPollingRef.current = false;
+        }
+      }, 110);
+
+      // Flush accumulated 16kHz PCM mic chunks every 150ms
+      flushAudioIntervalRef.current = window.setInterval(async () => {
+        if (
+          !liveSessionIdRef.current ||
+          isFlushingAudioRef.current ||
+          pendingAudioChunksRef.current.length === 0
+        ) {
+          return;
+        }
+        isFlushingAudioRef.current = true;
+        const chunksToSend = pendingAudioChunksRef.current.splice(
+          0,
+          pendingAudioChunksRef.current.length
+        );
+        try {
+          const sendRes = await fetch('/api/live/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId: liveSessionIdRef.current,
+              audioChunks: chunksToSend,
+            }),
+          });
+          const sendData = await sendRes.json();
+          if (Array.isArray(sendData.events) && sendData.events.length > 0) {
+            processLiveServerEvents(sendData.events);
+          }
+        } catch {
+          // Ignore transient flush error
+        } finally {
+          isFlushingAudioRef.current = false;
+        }
+      }, 150);
+
+      // Attach browser microphone if available
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -411,7 +634,6 @@ export default function App() {
           inputAudioCtxRef.current = inputCtx;
 
           const source = inputCtx.createMediaStreamSource(stream);
-          // 2048 buffer size cuts input latency in half for natural turn flow
           const processor = inputCtx.createScriptProcessor(2048, 1, 1);
           processorRef.current = processor;
 
@@ -419,7 +641,7 @@ export default function App() {
           processor.connect(inputCtx.destination);
 
           processor.onaudioprocess = (e) => {
-            if (isMutedRef.current || ws.readyState !== WebSocket.OPEN) return;
+            if (isMutedRef.current || !liveSessionIdRef.current) return;
             const rawChannelData = e.inputBuffer.getChannelData(0);
 
             // Resample from hardware AudioContext sampleRate (e.g. 48000Hz) to exact 16000Hz
@@ -449,136 +671,22 @@ export default function App() {
 
             const pcm16 = float32ToInt16Pcm(channelData);
             const base64Audio = arrayBufferToBase64(pcm16.buffer);
-            ws.send(JSON.stringify({ audio: base64Audio }));
+            pendingAudioChunksRef.current.push(base64Audio);
+            if (pendingAudioChunksRef.current.length > 24) {
+              pendingAudioChunksRef.current.splice(
+                0,
+                pendingAudioChunksRef.current.length - 24
+              );
+            }
           };
         } catch {
-          setErrorMessage(
-            'Microphone access was unavailable or blocked, so Live Voice is connected in text-to-voice mode. You can still type below and hear Aanya speak live!'
-          );
+          // Keep Live Session connected so user can still talk via the input box and hear Aanya live
         }
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-
-          if (msg.type === 'ready') {
-            setConnectionState('connected');
-          } else if (msg.type === 'languageGateChanged' && msg.languageGate) {
-            setConfig((prev) => ({ ...prev, languageGate: msg.languageGate }));
-            setSuppressedTeluguNotice(null);
-          } else if (msg.type === 'suppressedAccidentalTelugu') {
-            stopAllPlayback();
-            pendingInputRef.current = '';
-            pendingOutputRef.current = '';
-            pendingModelTextRef.current = '';
-            setLiveInputText('');
-            setLiveOutputText('');
-            setSuppressedTeluguNotice(
-              `Ignored unrequested Telugu speech (“${msg.text || 'Telugu audio'}”) because English-Only Gate is active. Say "talk in Telugu" or click "Ask for Telugu" if you want Aanya to reply in Telugu.`
-            );
-          } else if (msg.type === 'audio' && msg.audio) {
-            playPcm24kChunk(msg.audio);
-          } else if (msg.type === 'inputTranscript' && msg.text) {
-            setSuppressedTeluguNotice(null);
-            pendingInputRef.current += msg.text;
-            setLiveInputText(pendingInputRef.current);
-          } else if (msg.type === 'outputTranscript' && msg.text) {
-            pendingOutputRef.current += msg.text;
-            setLiveOutputText(pendingOutputRef.current);
-          } else if (msg.type === 'modelText' && msg.text) {
-            pendingModelTextRef.current += msg.text;
-          } else if (msg.type === 'interrupted') {
-            stopAllPlayback();
-          } else if (msg.type === 'turnComplete') {
-            const finalUser = pendingInputRef.current.trim();
-            const finalPartner =
-              pendingOutputRef.current.trim() || pendingModelTextRef.current.trim();
-
-            if (finalUser) {
-              lastUserTextRef.current = finalUser;
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  speaker: 'user',
-                  text: finalUser,
-                  timestamp: formatNow(),
-                  wordCount: countWords(finalUser),
-                  via: 'voice',
-                },
-              ]);
-              setCallRecords((prev) =>
-                prev.map((call, idx) =>
-                  idx === 0
-                    ? {
-                        ...call,
-                        userUtterances: [...call.userUtterances, finalUser],
-                        fullTurns: [
-                          ...call.fullTurns,
-                          { speaker: 'user', text: finalUser, timestamp: formatNow() },
-                        ],
-                        totalUserWords: call.totalUserWords + countWords(finalUser),
-                      }
-                    : call
-                )
-              );
-            }
-
-            if (finalPartner) {
-              const metrics = analyzeTurnMirroring(lastUserTextRef.current, finalPartner);
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  speaker: 'partner',
-                  text: finalPartner,
-                  timestamp: formatNow(),
-                  wordCount: countWords(finalPartner),
-                  mirrorFit: metrics.fitLabel,
-                  via: 'voice',
-                },
-              ]);
-              setCallRecords((prev) =>
-                prev.map((call, idx) =>
-                  idx === 0
-                    ? {
-                        ...call,
-                        fullTurns: [
-                          ...call.fullTurns,
-                          { speaker: 'partner', text: finalPartner, timestamp: formatNow() },
-                        ],
-                      }
-                    : call
-                )
-              );
-            }
-
-            pendingInputRef.current = '';
-            pendingOutputRef.current = '';
-            pendingModelTextRef.current = '';
-            setLiveInputText('');
-            setLiveOutputText('');
-          } else if (msg.type === 'error') {
-            setErrorMessage(msg.message || 'Live voice session encountered an error.');
-          }
-        } catch {
-          // Ignore malformed WS frames
-        }
-      };
-
-      ws.onerror = () => {
-        setErrorMessage('WebSocket connection error. You can still talk with Aanya using the input box below.');
-        cleanupLiveCall();
-      };
-
-      ws.onclose = () => {
-        setConnectionState('idle');
-      };
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMessage(msg);
-      setConnectionState('idle');
+      cleanupLiveCall();
     }
   };
 
@@ -654,14 +762,6 @@ export default function App() {
 
     if (decision.nextGateMode !== config.languageGate) {
       setConfig((prev) => ({ ...prev, languageGate: decision.nextGateMode }));
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'setLanguageGate',
-            languageGate: decision.nextGateMode,
-          })
-        );
-      }
     }
 
     lastUserTextRef.current = trimmed;
@@ -693,8 +793,24 @@ export default function App() {
       )
     );
 
-    if (connectionState === 'connected' && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ text: trimmed }));
+    if (connectionState === 'connected' && liveSessionIdRef.current) {
+      try {
+        const res = await fetch('/api/live/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: liveSessionIdRef.current,
+            text: trimmed,
+            languageGate: decision.nextGateMode,
+          }),
+        });
+        const data = await res.json();
+        if (Array.isArray(data?.events) && data.events.length > 0) {
+          processLiveServerEvents(data.events);
+        }
+      } catch {
+        // Fallback if session closed
+      }
       return;
     }
 
