@@ -1,0 +1,6 @@
+{
+  "name": "Aanya — Gemini Live Voice Partner",
+  "description": "A real-time Gemini Live voice companion with a natural female voice that mirrors your conversational length, banter, and everyday Indian-English flow.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
