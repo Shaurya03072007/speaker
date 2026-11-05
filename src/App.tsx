@@ -15,8 +15,11 @@ import {
   computeTargetWordRange,
   ConversationMessage,
   countWords,
+  evaluateLanguagePolicy,
   float32ToInt16Pcm,
   int16PcmToFloat32,
+  LanguageGateMode,
+  resampleAudioTo16kHz,
 } from './utils/companionLogic';
 import { LiveConnectionState, LiveStageCard } from './components/LiveStageCard';
 import { PersonaSidebar } from './components/PersonaSidebar';
@@ -27,20 +30,22 @@ const INITIAL_SAMPLE_MESSAGES: ConversationMessage[] = [
   {
     id: 'seed-1',
     speaker: 'user',
-    text: 'Yaar I am just sitting here thinking why auto-wallahs always say no to the exact place I want to go.',
+    text: 'I am just sitting here wondering why cab drivers always cancel right when I am already running late.',
     timestamp: '11:42 PM',
-    wordCount: 20,
+    wordCount: 18,
     via: 'voice',
+    languageUsed: 'EN',
   },
   {
     id: 'seed-2',
     speaker: 'partner',
-    text: 'Arey honestly, they could be going to that exact street themselves and they will still shake their head out of pure principle.',
+    text: 'Honestly, it is like they have a sixth sense for when you are in a rush and cancel out of pure principle.',
     timestamp: '11:42 PM',
     wordCount: 22,
     mirrorFit: 'Proportional Match',
     bookmarked: true,
     via: 'voice',
+    languageUsed: 'EN',
   },
   {
     id: 'seed-3',
@@ -49,38 +54,40 @@ const INITIAL_SAMPLE_MESSAGES: ConversationMessage[] = [
     timestamp: '11:44 PM',
     wordCount: 22,
     via: 'voice',
+    languageUsed: 'EN',
   },
   {
     id: 'seed-4',
     speaker: 'partner',
-    text: 'Happens to everyone yaar when your brain runs faster than your mouth—take a half-second breath and drop the extra "only" at the end.',
+    text: 'That happens to everyone when your brain runs faster than your mouth—take a half-second breath and drop the extra "only" at the end.',
     timestamp: '11:44 PM',
     wordCount: 24,
     mirrorFit: 'Proportional Match',
     via: 'voice',
+    languageUsed: 'EN',
   },
 ];
 
 const INITIAL_CALL_RECORDS: CallSessionRecord[] = [
   {
     id: 'call-seed-1',
-    title: 'Call #1 · Auto-Wallahs & Fast-Talking Habits',
+    title: 'Call #1 · Evening Banter & Fast-Talking Habits',
     recordedAt: 'Tonight, 11:44 PM',
     durationLabel: '4 min text-only log',
     userUtterances: [
-      'Yaar I am just sitting here thinking why auto-wallahs always say no to the exact place I want to go.',
+      'I am just sitting here wondering why cab drivers always cancel right when I am already running late.',
       'Actually the thing is when I talk fast in meetings my words get mixed up only and I repeat same point twice.',
       'Full nonsense mood tonight, tell me if I am making sense or just rambling.',
     ],
     fullTurns: [
       {
         speaker: 'user',
-        text: 'Yaar I am just sitting here thinking why auto-wallahs always say no to the exact place I want to go.',
+        text: 'I am just sitting here wondering why cab drivers always cancel right when I am already running late.',
         timestamp: '11:42 PM',
       },
       {
         speaker: 'partner',
-        text: 'Arey honestly, they could be going to that exact street themselves and they will still shake their head out of pure principle.',
+        text: 'Honestly, it is like they have a sixth sense for when you are in a rush and cancel out of pure principle.',
         timestamp: '11:42 PM',
       },
       {
@@ -90,29 +97,29 @@ const INITIAL_CALL_RECORDS: CallSessionRecord[] = [
       },
       {
         speaker: 'partner',
-        text: 'Happens to everyone yaar when your brain runs faster than your mouth—take a half-second breath and drop the extra "only" at the end.',
+        text: 'That happens to everyone when your brain runs faster than your mouth—take a half-second breath and drop the extra "only" at the end.',
         timestamp: '11:44 PM',
       },
     ],
-    totalUserWords: 56,
+    totalUserWords: 54,
     analysisReport: {
       analyzedByModel: 'gemini-3.1-flash-lite',
       analyzedAt: '11:45 PM',
       overallAssessment:
-        'You speak with warm, relatable storytelling energy and natural Indian-English charm. Your ideas are vivid and engaging, though when you speed up, stack-on openers ("Actually the thing is...") and trailing emphasis words ("mixed up only") slightly soften your punch.',
+        'You speak with warm, relatable storytelling energy and natural Indian-English rhythm. Your ideas are vivid and engaging, though when you speed up, stacked openers ("Actually the thing is...") and trailing emphasis words ("mixed up only") slightly soften your clarity.',
       clarityScore: 84,
       fluencyAndFlowScore: 87,
       grammarAndStructureScore: 79,
       speakingStyleSummary:
         'Expressive, spontaneous, and conversational. You build rapport effortlessly in one breath, and pausing briefly before your main verb will make your spoken sentences land with 100% crispness.',
       strengths: [
-        'Strong storytelling hook ("sitting here thinking why auto-wallahs always say no") with natural rhythm.',
+        'Strong storytelling hook ("sitting here wondering why cab drivers always cancel") with natural rhythm.',
         'Self-aware and expressive flow that keeps a listener naturally engaged.',
         'Good sentence length variety—comfortable with both 20-word observations and quick banter.',
       ],
       habitsToRefine: [
         'Trim stacked warm-up openers like "Actually the thing is" when making a direct point.',
-        'Replace Indian-English trailing "only" ("mixed up only") with a clean verb or adjective for universal clarity.',
+        'Replace trailing "only" ("mixed up only") with a clean verb or adjective for universal clarity.',
         'Include articles ("the same point" instead of "repeat same point") so rapid speech still sounds complete.',
       ],
       lineByLineUpgrades: [
@@ -127,12 +134,12 @@ const INITIAL_CALL_RECORDS: CallSessionRecord[] = [
         },
         {
           exactSpokenText:
-            'Yaar I am just sitting here thinking why auto-wallahs always say no to the exact place I want to go.',
-          diagnosis: 'Great casual rhythm; "wondering why" flows even more smoothly than "thinking why"',
+            'I am just sitting here wondering why cab drivers always cancel right when I am already running late.',
+          diagnosis: 'Clear & well-structured sentence—great natural rhythm',
           casualNaturalUpgrade:
-            'Yaar, I am just sitting here wondering why auto-wallahs always say no to the exact place I want to go.',
+            'I am just sitting here wondering why cab drivers always cancel right when I am already running late.',
           polishedFluentUpgrade:
-            'I was just wondering why auto drivers always refuse to go to the exact destination you ask for.',
+            'I was just wondering why cab drivers always seem to cancel right when you are running late.',
         },
       ],
       nextCallMicroDrills: [
@@ -166,11 +173,12 @@ export default function App() {
   const [config, setConfig] = useState<CompanionConfig>({
     voiceName: 'Kore',
     vibeMode: 'banter',
-    userNickname: 'Yaar',
+    userNickname: 'Shaurya',
     indianEnglishNuance: 'natural',
+    languageGate: 'english-only-until-asked',
     memoryNotes: [
       'Talks random nonsense to unwind',
-      'Likes replies that match his exact talk length—not huge, not tiny',
+      'Speak ONLY in English unless explicitly asked for Telugu; ignore accidental Telugu',
     ],
     englishCoachingFocus: 'sentence-clarity',
   });
@@ -179,6 +187,7 @@ export default function App() {
     speakerBoost: 1.5, // Default 150% boosted clear output
     micBoost: 1.4, // Default 140% sensitive mic pickup
     vocalClarityEq: true,
+    echoGuard: true,
   });
 
   const [messages, setMessages] = useState<ConversationMessage[]>(INITIAL_SAMPLE_MESSAGES);
@@ -194,6 +203,7 @@ export default function App() {
   const [liveInputText, setLiveInputText] = useState('');
   const [liveOutputText, setLiveOutputText] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [suppressedTeluguNotice, setSuppressedTeluguNotice] = useState<string | null>(null);
   const [isSendingText, setIsSendingText] = useState(false);
 
   // Refs for WebSocket and Web Audio API to prevent stale closures
@@ -205,14 +215,20 @@ export default function App() {
   const nextStartTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const isMutedRef = useRef(isMuted);
+  const isModelSpeakingRef = useRef(isModelSpeaking);
   const audioBoostRef = useRef(audioBoost);
   const pendingInputRef = useRef('');
   const pendingOutputRef = useRef('');
+  const pendingModelTextRef = useRef('');
   const lastUserTextRef = useRef('Full nonsense mood tonight.');
 
   useEffect(() => {
     isMutedRef.current = isMuted;
   }, [isMuted]);
+
+  useEffect(() => {
+    isModelSpeakingRef.current = isModelSpeaking;
+  }, [isModelSpeaking]);
 
   useEffect(() => {
     audioBoostRef.current = audioBoost;
@@ -231,6 +247,7 @@ export default function App() {
       nextStartTimeRef.current = outputAudioCtxRef.current.currentTime;
     }
     setIsModelSpeaking(false);
+    isModelSpeakingRef.current = false;
   }, []);
 
   const playPcm24kChunk = useCallback((base64Data: string) => {
@@ -245,13 +262,11 @@ export default function App() {
 
       const int16 = base64ToInt16Array(base64Data);
       const unboostedFloat32 = int16PcmToFloat32(int16);
-      // Apply user's Speaker Audio Boost with soft-knee limiting
       const float32 = applyAudioBoostToSamples(
         unboostedFloat32,
         audioBoostRef.current.speakerBoost
       );
 
-      // Compute RMS audio level for visualizer
       let sumSq = 0;
       for (let i = 0; i < float32.length; i++) {
         sumSq += float32[i] * float32[i];
@@ -259,6 +274,7 @@ export default function App() {
       const rms = Math.min(1, Math.sqrt(sumSq / Math.max(1, float32.length)) * 3.5);
       setAudioLevel(rms);
       setIsModelSpeaking(true);
+      isModelSpeakingRef.current = true;
 
       const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
@@ -266,7 +282,6 @@ export default function App() {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
 
-      // Optional Vocal Clarity High-Shelf EQ Filter
       if (audioBoostRef.current.vocalClarityEq) {
         const eqFilter = ctx.createBiquadFilter();
         eqFilter.type = 'highshelf';
@@ -288,6 +303,7 @@ export default function App() {
         activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
         if (activeSourcesRef.current.length === 0) {
           setIsModelSpeaking(false);
+          isModelSpeakingRef.current = false;
           setAudioLevel(0);
         }
       };
@@ -326,6 +342,7 @@ export default function App() {
     setConnectionState('idle');
     setAudioLevel(0);
     setIsModelSpeaking(false);
+    isModelSpeakingRef.current = false;
   }, [stopAllPlayback]);
 
   useEffect(() => {
@@ -337,17 +354,34 @@ export default function App() {
   const formatNow = () =>
     new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+  const handleChangeLanguageGate = (nextMode: LanguageGateMode) => {
+    setSuppressedTeluguNotice(null);
+    setConfig((prev) => ({ ...prev, languageGate: nextMode }));
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'setLanguageGate',
+          languageGate: nextMode,
+        })
+      );
+    }
+  };
+
   const startLiveCall = async () => {
     setErrorMessage(null);
+    setSuppressedTeluguNotice(null);
     setConnectionState('connecting');
     pendingInputRef.current = '';
     pendingOutputRef.current = '';
+    pendingModelTextRef.current = '';
     setLiveInputText('');
     setLiveOutputText('');
 
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/live?voice=${encodeURIComponent(config.voiceName)}`;
+      const wsUrl = `${protocol}//${window.location.host}/live?voice=${encodeURIComponent(
+        config.voiceName
+      )}&languageGate=${encodeURIComponent(config.languageGate)}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -356,11 +390,11 @@ export default function App() {
           JSON.stringify({
             type: 'init',
             voiceName: config.voiceName,
+            languageGate: config.languageGate,
             systemInstruction: buildCompanionSystemInstruction(config),
           })
         );
 
-        // Request microphone 16kHz input
         try {
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -368,6 +402,7 @@ export default function App() {
               channelCount: 1,
               echoCancellation: true,
               noiseSuppression: true,
+              autoGainControl: true,
             },
           });
           micStreamRef.current = stream;
@@ -376,7 +411,8 @@ export default function App() {
           inputAudioCtxRef.current = inputCtx;
 
           const source = inputCtx.createMediaStreamSource(stream);
-          const processor = inputCtx.createScriptProcessor(4096, 1, 1);
+          // 2048 buffer size cuts input latency in half for natural turn flow
+          const processor = inputCtx.createScriptProcessor(2048, 1, 1);
           processorRef.current = processor;
 
           source.connect(processor);
@@ -385,18 +421,30 @@ export default function App() {
           processor.onaudioprocess = (e) => {
             if (isMutedRef.current || ws.readyState !== WebSocket.OPEN) return;
             const rawChannelData = e.inputBuffer.getChannelData(0);
-            // Apply Mic Pickup Audio Boost before encoding to 16kHz PCM
+
+            // Resample from hardware AudioContext sampleRate (e.g. 48000Hz) to exact 16000Hz
+            const resampled16k = resampleAudioTo16kHz(rawChannelData, inputCtx.sampleRate);
             const channelData = applyAudioBoostToSamples(
-              rawChannelData,
+              resampled16k,
               audioBoostRef.current.micBoost
             );
 
-            // Compute mic input RMS for visualizer
+            // Compute mic input RMS
             let sum = 0;
             for (let i = 0; i < channelData.length; i++) {
               sum += channelData[i] * channelData[i];
             }
-            const rms = Math.min(1, Math.sqrt(sum / channelData.length) * 4);
+            const rms = Math.min(1, Math.sqrt(sum / Math.max(1, channelData.length)) * 4);
+
+            // Echo Guard: while Aanya is speaking, ignore low-volume speaker bleed so she isn't cut off
+            if (
+              audioBoostRef.current.echoGuard &&
+              isModelSpeakingRef.current &&
+              rms < 0.22
+            ) {
+              return;
+            }
+
             setAudioLevel(rms);
 
             const pcm16 = float32ToInt16Pcm(channelData);
@@ -416,19 +464,36 @@ export default function App() {
 
           if (msg.type === 'ready') {
             setConnectionState('connected');
+          } else if (msg.type === 'languageGateChanged' && msg.languageGate) {
+            setConfig((prev) => ({ ...prev, languageGate: msg.languageGate }));
+            setSuppressedTeluguNotice(null);
+          } else if (msg.type === 'suppressedAccidentalTelugu') {
+            stopAllPlayback();
+            pendingInputRef.current = '';
+            pendingOutputRef.current = '';
+            pendingModelTextRef.current = '';
+            setLiveInputText('');
+            setLiveOutputText('');
+            setSuppressedTeluguNotice(
+              `Ignored unrequested Telugu speech (“${msg.text || 'Telugu audio'}”) because English-Only Gate is active. Say "talk in Telugu" or click "Ask for Telugu" if you want Aanya to reply in Telugu.`
+            );
           } else if (msg.type === 'audio' && msg.audio) {
             playPcm24kChunk(msg.audio);
           } else if (msg.type === 'inputTranscript' && msg.text) {
+            setSuppressedTeluguNotice(null);
             pendingInputRef.current += msg.text;
             setLiveInputText(pendingInputRef.current);
           } else if (msg.type === 'outputTranscript' && msg.text) {
             pendingOutputRef.current += msg.text;
             setLiveOutputText(pendingOutputRef.current);
+          } else if (msg.type === 'modelText' && msg.text) {
+            pendingModelTextRef.current += msg.text;
           } else if (msg.type === 'interrupted') {
             stopAllPlayback();
           } else if (msg.type === 'turnComplete') {
             const finalUser = pendingInputRef.current.trim();
-            const finalPartner = pendingOutputRef.current.trim();
+            const finalPartner =
+              pendingOutputRef.current.trim() || pendingModelTextRef.current.trim();
 
             if (finalUser) {
               lastUserTextRef.current = finalUser;
@@ -443,7 +508,21 @@ export default function App() {
                   via: 'voice',
                 },
               ]);
-              pendingInputRef.current = '';
+              setCallRecords((prev) =>
+                prev.map((call, idx) =>
+                  idx === 0
+                    ? {
+                        ...call,
+                        userUtterances: [...call.userUtterances, finalUser],
+                        fullTurns: [
+                          ...call.fullTurns,
+                          { speaker: 'user', text: finalUser, timestamp: formatNow() },
+                        ],
+                        totalUserWords: call.totalUserWords + countWords(finalUser),
+                      }
+                    : call
+                )
+              );
             }
 
             if (finalPartner) {
@@ -460,8 +539,26 @@ export default function App() {
                   via: 'voice',
                 },
               ]);
-              pendingOutputRef.current = '';
+              setCallRecords((prev) =>
+                prev.map((call, idx) =>
+                  idx === 0
+                    ? {
+                        ...call,
+                        fullTurns: [
+                          ...call.fullTurns,
+                          { speaker: 'partner', text: finalPartner, timestamp: formatNow() },
+                        ],
+                      }
+                    : call
+                )
+              );
             }
+
+            pendingInputRef.current = '';
+            pendingOutputRef.current = '';
+            pendingModelTextRef.current = '';
+            setLiveInputText('');
+            setLiveOutputText('');
           } else if (msg.type === 'error') {
             setErrorMessage(msg.message || 'Live voice session encountered an error.');
           }
@@ -488,7 +585,6 @@ export default function App() {
   const playWavBase64 = (wavBase64: string) => {
     try {
       const audio = new Audio(`data:audio/wav;base64,${wavBase64}`);
-      // Route through Web Audio GainNode so >100% Speaker Boost works on WAV TTS too
       if (!outputAudioCtxRef.current) {
         outputAudioCtxRef.current = new AudioContext();
       }
@@ -514,21 +610,26 @@ export default function App() {
       }
 
       setIsModelSpeaking(true);
+      isModelSpeakingRef.current = true;
       setAudioLevel(0.65);
       audio.onended = () => {
         setIsModelSpeaking(false);
+        isModelSpeakingRef.current = false;
         setAudioLevel(0);
       };
       audio.onerror = () => {
         setIsModelSpeaking(false);
+        isModelSpeakingRef.current = false;
         setAudioLevel(0);
       };
       audio.play().catch(() => {
         setIsModelSpeaking(false);
+        isModelSpeakingRef.current = false;
         setAudioLevel(0);
       });
     } catch {
       setIsModelSpeaking(false);
+      isModelSpeakingRef.current = false;
     }
   };
 
@@ -537,6 +638,32 @@ export default function App() {
     if (!trimmed) return;
 
     setErrorMessage(null);
+
+    // Evaluate strict English / Telugu-only-if-asked policy
+    const decision = evaluateLanguagePolicy(trimmed, config.languageGate);
+
+    if (decision.shouldSuppressAccidentalTelugu) {
+      setSuppressedTeluguNotice(
+        decision.suppressionReason ||
+          'Accidental Telugu ignored while in English-Only mode. Ask "talk in Telugu" first if you want Telugu.'
+      );
+      return;
+    }
+
+    setSuppressedTeluguNotice(null);
+
+    if (decision.nextGateMode !== config.languageGate) {
+      setConfig((prev) => ({ ...prev, languageGate: decision.nextGateMode }));
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({
+            type: 'setLanguageGate',
+            languageGate: decision.nextGateMode,
+          })
+        );
+      }
+    }
+
     lastUserTextRef.current = trimmed;
 
     const userMsg: ConversationMessage = {
@@ -546,10 +673,10 @@ export default function App() {
       timestamp: formatNow(),
       wordCount: countWords(trimmed),
       via: connectionState === 'connected' ? 'voice' : 'text',
+      languageUsed: decision.allowedLanguage === 'telugu' ? 'TE' : 'EN',
     };
     setMessages((prev) => [...prev, userMsg]);
 
-    // Also append to the currently selected call transcript's verbatim utterances
     setCallRecords((prev) =>
       prev.map((call, idx) =>
         idx === 0
@@ -566,24 +693,27 @@ export default function App() {
       )
     );
 
-    // If connected to Gemini Live WebSocket, send into the live voice session
     if (connectionState === 'connected' && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ text: trimmed }));
       return;
     }
 
-    // Otherwise call the companion banter endpoint (which also synthesizes her female voice)
     setIsSendingText(true);
     try {
       const range = computeTargetWordRange(trimmed);
+      const updatedConfig: CompanionConfig = {
+        ...config,
+        languageGate: decision.nextGateMode,
+      };
       const response = await fetch('/api/companion/banter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userText: trimmed,
-          systemInstruction: buildCompanionSystemInstruction(config),
+          systemInstruction: buildCompanionSystemInstruction(updatedConfig),
           voiceName: config.voiceName,
-          history: messages.slice(-6).map((m) => ({ speaker: m.speaker, text: m.text })),
+          allowedLanguage: decision.allowedLanguage,
+          history: messages.slice(-8).map((m) => ({ speaker: m.speaker, text: m.text })),
           targetMin: range.minTargetWords,
           targetMax: range.maxTargetWords,
           speakReply: true,
@@ -595,7 +725,7 @@ export default function App() {
         throw new Error(data.error || 'Could not generate reply');
       }
 
-      const replyText = data.replyText || 'Arey yaar, tell me more!';
+      const replyText = data.replyText || 'Tell me more, I am listening!';
       const metrics = analyzeTurnMirroring(trimmed, replyText);
 
       const partnerMsg: ConversationMessage = {
@@ -606,6 +736,7 @@ export default function App() {
         wordCount: countWords(replyText),
         mirrorFit: metrics.fitLabel,
         via: 'text',
+        languageUsed: decision.allowedLanguage === 'telugu' ? 'TE' : 'EN',
       };
       setMessages((prev) => [...prev, partnerMsg]);
 
@@ -697,6 +828,7 @@ export default function App() {
           userText: `Repeat this exact line aloud: "${text}"`,
           systemInstruction: `Output ONLY this exact sentence word for word: ${text}`,
           voiceName: config.voiceName,
+          allowedLanguage: /[\u0C00-\u0C7F]/.test(text) ? 'telugu' : 'english',
           speakReply: true,
         }),
       });
@@ -791,7 +923,7 @@ export default function App() {
             Talk random nonsense, late-night thoughts, or everyday life—just like a real partner.
           </h1>
           <p className="text-base text-stone-600 leading-relaxed">
-            Powered by <span className="font-medium text-stone-800">Gemini Live</span> with a natural female voice ({config.voiceName}) and real-time audio boosting. Every call records the exact text from your mouth (no voice recording) so <span className="font-medium text-stone-800">Gemini Flash Lite</span> can deeply analyze your English clarity and how you speak.
+            Powered by <span className="font-medium text-stone-800">Gemini Live</span> with a natural female voice ({config.voiceName}), low-latency 16kHz audio resampling, and a <span className="font-medium text-stone-800">Strict English / Telugu-Only-If-Asked Gate</span> that ignores accidental Telugu speech.
           </p>
         </div>
 
@@ -810,10 +942,12 @@ export default function App() {
               liveInputText={liveInputText}
               liveOutputText={liveOutputText}
               errorMessage={errorMessage}
+              suppressedTeluguNotice={suppressedTeluguNotice}
               isSendingText={isSendingText}
               onStartLiveCall={startLiveCall}
               onEndLiveCall={cleanupLiveCall}
               onToggleMute={() => setIsMuted((prev) => !prev)}
+              onChangeLanguageGate={handleChangeLanguageGate}
               onUpdateAudioBoost={setAudioBoost}
               onSendMessage={handleSendMessage}
             />
@@ -858,7 +992,7 @@ export default function App() {
       {/* Quiet Editorial Footer */}
       <footer className="border-t border-stone-200 bg-white py-4 px-6 text-xs text-stone-500 flex flex-col sm:flex-row items-center justify-between gap-2">
         <span>Aanya — Gemini Live Female Voice Companion</span>
-        <span>Audio Boost DSP · Verbatim text-only call recorder · Gemini Flash Lite English Coach</span>
+        <span>Strict English / Explicit-Only Telugu Gate · 16kHz Resampler · Gemini Flash Lite Coach</span>
       </footer>
     </div>
   );

@@ -4,6 +4,7 @@ import {
   AudioBoostConfig,
   CompanionConfig,
   computeTargetWordRange,
+  LanguageGateMode,
 } from '../utils/companionLogic';
 
 export type LiveConnectionState = 'idle' | 'connecting' | 'connected' | 'error';
@@ -19,19 +20,21 @@ interface LiveStageCardProps {
   liveInputText: string;
   liveOutputText: string;
   errorMessage: string | null;
+  suppressedTeluguNotice: string | null;
   isSendingText: boolean;
   onStartLiveCall: () => void;
   onEndLiveCall: () => void;
   onToggleMute: () => void;
+  onChangeLanguageGate: (mode: LanguageGateMode) => void;
   onUpdateAudioBoost: (updater: (prev: AudioBoostConfig) => AudioBoostConfig) => void;
   onSendMessage: (text: string) => Promise<void>;
 }
 
 const NONSENSE_SPARKS = [
-  'Yaar why do ceiling fans look so philosophical at 2 AM?',
-  'Acha listen, if pigeons started paying rent on my balcony, how much should I charge?',
-  'Bro my brain is doing zero work today, just pure vibes and chai.',
-  'Tell me honestly, is eating Maggi at midnight a lifestyle or a cry for help?',
+  'Why do ceiling fans look so philosophical at 2 AM?',
+  'If pigeons started paying rent on my balcony, how much should I charge?',
+  'My brain is doing zero work today, just pure vibes and filter coffee.',
+  'Hey Aanya, can you talk in Telugu with me for a bit?',
 ];
 
 export const LiveStageCard: React.FC<LiveStageCardProps> = ({
@@ -45,10 +48,12 @@ export const LiveStageCard: React.FC<LiveStageCardProps> = ({
   liveInputText,
   liveOutputText,
   errorMessage,
+  suppressedTeluguNotice,
   isSendingText,
   onStartLiveCall,
   onEndLiveCall,
   onToggleMute,
+  onChangeLanguageGate,
   onUpdateAudioBoost,
   onSendMessage,
 }) => {
@@ -246,6 +251,60 @@ export const LiveStageCard: React.FC<LiveStageCardProps> = ({
           </div>
         </div>
       )}
+
+      {/* Accidental Telugu Suppression Notice */}
+      {suppressedTeluguNotice && (
+        <div
+          role="status"
+          data-testid="suppressed-telugu-banner"
+          className="bg-amber-50 border border-amber-300 rounded-lg p-3.5 flex items-start gap-3 text-xs text-amber-950"
+        >
+          <AlertCircle className="w-4 h-4 text-amber-800 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="font-semibold">Accidental Telugu Ignored (Strict English Gate Active)</p>
+            <p className="mt-0.5">{suppressedTeluguNotice}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Strict Language Gate & Smooth Turn-Flow Bar */}
+      <div className="bg-stone-50 border border-stone-200 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <span className="text-xs font-semibold text-stone-900 block">
+            Strict Language Gate (English Only · Telugu Only If Asked)
+          </span>
+          <span className="text-xs text-stone-500">
+            {config.languageGate === 'english-only-until-asked'
+              ? 'Speaking English only — accidental or background Telugu speech will NOT be answered.'
+              : 'Telugu explicitly unlocked — Aanya can reply in Telugu or English until you switch back.'}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1 p-1 bg-stone-200/80 rounded-lg shrink-0">
+          <button
+            type="button"
+            onClick={() => onChangeLanguageGate('english-only-until-asked')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              config.languageGate === 'english-only-until-asked'
+                ? 'bg-stone-900 text-white shadow-xs'
+                : 'text-stone-700 hover:text-stone-900'
+            }`}
+          >
+            English Only (Ignore Mistaken Telugu)
+          </button>
+          <button
+            type="button"
+            onClick={() => onChangeLanguageGate('telugu-explicitly-enabled')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              config.languageGate === 'telugu-explicitly-enabled'
+                ? 'bg-amber-800 text-white shadow-xs'
+                : 'text-stone-700 hover:text-stone-900'
+            }`}
+          >
+            Ask for Telugu
+          </button>
+        </div>
+      </div>
 
       {/* Acoustic Visualizer & Live Stream Transcript Box */}
       <div className="bg-stone-50 border border-stone-200 rounded-xl p-5 flex flex-col gap-4">

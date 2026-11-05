@@ -9,17 +9,19 @@ import {
   int16PcmToFloat32,
   applyAudioBoostToSamples,
   buildCallRecordFromMessages,
+  evaluateLanguagePolicy,
+  resampleAudioTo16kHz,
 } from './companionLogic';
 
 test('countWords accurately counts words in casual Indian-English sentences', () => {
   assert.equal(countWords(''), 0);
   assert.equal(countWords('   '), 0);
-  assert.equal(countWords('Arey yaar what is happening'), 5);
+  assert.equal(countWords('Hey what is happening today'), 5);
   assert.equal(countWords('I swear pigeons are secretly judging my driving today.'), 9);
 });
 
 test('computeTargetWordRange adapts dynamically to short, casual, and longer inputs', () => {
-  const shortRange = computeTargetWordRange('Yaar I am bored');
+  const shortRange = computeTargetWordRange('Man I am bored');
   assert.equal(shortRange.userWords, 4);
   assert.equal(shortRange.pacingLabel, 'Quick quip');
   assert.ok(shortRange.minTargetWords <= 4 && shortRange.maxTargetWords >= 8);
@@ -32,8 +34,8 @@ test('computeTargetWordRange adapts dynamically to short, casual, and longer inp
 });
 
 test('analyzeTurnMirroring classifies proportional vs too short or too long replies', () => {
-  const userTurn = 'Yaar why do ceiling fans look so philosophical at 1 AM?';
-  const proportionalReply = 'Arey because at 1 AM your brain is running on zero battery and pure vibes.';
+  const userTurn = 'Why do ceiling fans look so philosophical at 1 AM?';
+  const proportionalReply = 'Because at 1 AM your brain is running on zero battery and pure vibes.';
   const metrics = analyzeTurnMirroring(userTurn, proportionalReply);
   assert.equal(metrics.fitLabel, 'Proportional Match');
 
@@ -46,20 +48,77 @@ test('analyzeTurnMirroring classifies proportional vs too short or too long repl
   assert.equal(expandedMetrics.fitLabel, 'Slightly Expanded');
 });
 
-test('buildCompanionSystemInstruction includes female persona, length mirroring, and memory notes', () => {
+test('buildCompanionSystemInstruction enforces strict English/Telugu-only-when-asked rule', () => {
   const prompt = buildCompanionSystemInstruction({
     voiceName: 'Kore',
     vibeMode: 'banter',
     userNickname: 'Shaurya',
     indianEnglishNuance: 'natural',
-    memoryNotes: ['Drinks ginger chai at midnight', 'Talks random nonsense when tired'],
+    languageGate: 'english-only-until-asked',
+    memoryNotes: ['Drinks ginger chai at midnight'],
     englishCoachingFocus: 'sentence-clarity',
   });
 
   assert.ok(prompt.includes('Aanya'));
-  assert.ok(prompt.includes('Shaurya'));
-  assert.ok(prompt.includes('MIRROR HIS LENGTH AND PACE'));
-  assert.ok(prompt.includes('Drinks ginger chai at midnight'));
+  assert.ok(prompt.includes('STRICT LANGUAGE RULE (ENGLISH ONLY — IGNORE ACCIDENTAL TELUGU)'));
+  assert.ok(prompt.includes('NEVER speak Hindi'));
+});
+
+test('evaluateLanguagePolicy blocks accidental Telugu when not requested, and unlocks Telugu only when asked', () => {
+  // 1. Normal English sentence -> allowed in English
+  const englishTurn = evaluateLanguagePolicy(
+    'I had a crazy day in traffic today',
+    'english-only-until-asked'
+  );
+  assert.equal(englishTurn.allowedLanguage, 'english');
+  assert.equal(englishTurn.shouldSuppressAccidentalTelugu, false);
+
+  // 2. Accidental Telugu script or phrase spoken by mistake -> suppressed!
+  const accidentalScript = evaluateLanguagePolicy(
+    'ఏం చేస్తున్నావ్ అక్కడ',
+    'english-only-until-asked'
+  );
+  assert.equal(accidentalScript.shouldSuppressAccidentalTelugu, true);
+
+  const accidentalRoman = evaluateLanguagePolicy(
+    'em chestunnav ra',
+    'english-only-until-asked'
+  );
+  assert.equal(accidentalRoman.shouldSuppressAccidentalTelugu, true);
+
+  // 3. Explicit request to speak Telugu -> unlocks Telugu mode
+  const explicitRequest = evaluateLanguagePolicy(
+    'Hey Aanya, can you talk in Telugu for a bit?',
+    'english-only-until-asked'
+  );
+  assert.equal(explicitRequest.allowedLanguage, 'telugu');
+  assert.equal(explicitRequest.nextGateMode, 'telugu-explicitly-enabled');
+  assert.equal(explicitRequest.shouldSuppressAccidentalTelugu, false);
+
+  // 4. Subsequent Telugu turn once Telugu is enabled -> allowed!
+  const allowedTelugu = evaluateLanguagePolicy(
+    'ఏం చేస్తున్నావ్',
+    explicitRequest.nextGateMode
+  );
+  assert.equal(allowedTelugu.allowedLanguage, 'telugu');
+  assert.equal(allowedTelugu.shouldSuppressAccidentalTelugu, false);
+
+  // 5. Explicit switch back to English -> locks back to English-only
+  const switchBack = evaluateLanguagePolicy(
+    'Let us switch back to English only now',
+    'telugu-explicitly-enabled'
+  );
+  assert.equal(switchBack.allowedLanguage, 'english');
+  assert.equal(switchBack.nextGateMode, 'english-only-until-asked');
+});
+
+test('resampleAudioTo16kHz downsamples 48kHz audio to exact 16kHz length', () => {
+  const input48k = new Float32Array(4800);
+  for (let i = 0; i < input48k.length; i++) {
+    input48k[i] = Math.sin((2 * Math.PI * 440 * i) / 48000);
+  }
+  const output16k = resampleAudioTo16kHz(input48k, 48000);
+  assert.equal(output16k.length, 1600);
 });
 
 test('PCM audio conversion round-trips Float32 and Int16 accurately', () => {
@@ -82,7 +141,6 @@ test('applyAudioBoostToSamples amplifies quiet signals and soft-limits peaks wit
   const boosted = applyAudioBoostToSamples(quiet, 2.0);
   assert.ok(Math.abs(boosted[0] - 0.4) < 0.001);
   assert.ok(Math.abs(boosted[1] - -0.4) < 0.001);
-  // 0.8 * 2.0 = 1.6, soft limiter keeps it strictly <= 1.0 and > 0.85
   assert.ok(boosted[2] > 0.85 && boosted[2] <= 1.0);
 });
 
@@ -99,9 +157,9 @@ test('buildCallRecordFromMessages extracts only verbatim text utterances with wo
     {
       id: '2',
       speaker: 'partner',
-      text: 'Arey that happens to everyone yaar when your brain runs faster than your mouth.',
+      text: 'That happens to everyone when your brain runs faster than your mouth.',
       timestamp: '10:00 PM',
-      wordCount: 14,
+      wordCount: 12,
       via: 'voice',
     },
   ]);

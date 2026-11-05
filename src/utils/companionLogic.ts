@@ -2,10 +2,13 @@ export type FemaleVoiceName = 'Kore' | 'Zephyr';
 
 export type VibeMode = 'banter' | 'late-night' | 'warm-partner';
 
+export type LanguageGateMode = 'english-only-until-asked' | 'telugu-explicitly-enabled';
+
 export interface AudioBoostConfig {
   speakerBoost: number; // 1.0 to 2.5 (100% to 250%)
   micBoost: number; // 1.0 to 2.5 (100% to 250%)
   vocalClarityEq: boolean; // High-presence vocal clarity filter
+  echoGuard: boolean; // Prevents speaker bleed / self-interruption while Aanya speaks
 }
 
 export interface CompanionConfig {
@@ -13,8 +16,16 @@ export interface CompanionConfig {
   vibeMode: VibeMode;
   userNickname: string;
   indianEnglishNuance: 'natural' | 'light' | 'expressive';
+  languageGate: LanguageGateMode;
   memoryNotes: string[];
   englishCoachingFocus: 'fluency-flow' | 'sentence-clarity' | 'natural-vocabulary';
+}
+
+export interface LanguageGateDecision {
+  allowedLanguage: 'english' | 'telugu';
+  nextGateMode: LanguageGateMode;
+  shouldSuppressAccidentalTelugu: boolean;
+  suppressionReason?: string;
 }
 
 export interface TurnMirrorMetrics {
@@ -35,6 +46,7 @@ export interface ConversationMessage {
   mirrorFit?: 'Proportional Match' | 'Slightly Concise' | 'Slightly Expanded';
   bookmarked?: boolean;
   via: 'voice' | 'text';
+  languageUsed?: 'EN' | 'TE';
 }
 
 export interface LineUpgradeItem {
@@ -97,7 +109,7 @@ export const VIBE_MODE_OPTIONS: Array<{
   {
     id: 'banter',
     label: 'Nonsense & Banter',
-    shortDesc: 'Rolls with random thoughts, silly hypotheticals, and playful desi-English back-and-forth.',
+    shortDesc: 'Rolls with random thoughts, silly hypotheticals, and playful back-and-forth.',
   },
   {
     id: 'late-night',
@@ -174,10 +186,89 @@ export function analyzeTurnMirroring(userText: string, partnerText: string): Tur
   };
 }
 
+const EXPLICIT_TELUGU_REQUEST_PATTERNS = [
+  /\b(talk|speak|reply|answer|chat|switch|converse)\b.*\b(in\s+)?telugu\b/i,
+  /\btelugu\s+(lo|la)\s+(matladu|matladandi|cheppu|cheppandi)\b/i,
+  /\bcan\s+you\s+(speak|talk)\s+telugu\b/i,
+  /\btelugu\s+please\b/i,
+];
+
+const EXPLICIT_ENGLISH_REQUEST_PATTERNS = [
+  /\b(talk|speak|reply|answer|switch|back)\b.*\b(in\s+|to\s+)?english\b/i,
+  /\bonly\s+english\b/i,
+  /\benglish\s+only\b/i,
+];
+
+// Telugu Unicode block: \u0C00-\u0C7F, plus common unrequested romanized Telugu-only phrases
+const TELUGU_SCRIPT_REGEX = /[\u0C00-\u0C7F]/;
+const ACCIDENTAL_ROMAN_TELUGU_REGEX =
+  /^\s*(em\s+chestunnav|ela\s+unnav|enti\s+sangati|cheppu\s+ra|em\s+ledu|avuna|sare\s+le|ekkada\s+unnav|bojanam\s+chesava)(\s+ra|\s+amma|\s+babu)?\s*[?.!]*$/i;
+
+/**
+ * Enforces strict language policy:
+ * - Talk ONLY in English or Telugu (NEVER Hindi, Tamil, etc.).
+ * - Speak Telugu ONLY if explicitly asked by the user.
+ * - If Telugu is spoken by mistake (without asking to switch to Telugu), suppress/ignore it!
+ */
+export function evaluateLanguagePolicy(
+  userText: string,
+  currentGateMode: LanguageGateMode
+): LanguageGateDecision {
+  const trimmed = userText.trim();
+
+  // Check if user explicitly asked to switch back to English
+  if (EXPLICIT_ENGLISH_REQUEST_PATTERNS.some((re) => re.test(trimmed))) {
+    return {
+      allowedLanguage: 'english',
+      nextGateMode: 'english-only-until-asked',
+      shouldSuppressAccidentalTelugu: false,
+    };
+  }
+
+  // Check if user explicitly asked to speak in Telugu
+  if (EXPLICIT_TELUGU_REQUEST_PATTERNS.some((re) => re.test(trimmed))) {
+    return {
+      allowedLanguage: 'telugu',
+      nextGateMode: 'telugu-explicitly-enabled',
+      shouldSuppressAccidentalTelugu: false,
+    };
+  }
+
+  // If Telugu is already explicitly enabled by the user's prior request or toggle
+  if (currentGateMode === 'telugu-explicitly-enabled') {
+    return {
+      allowedLanguage: 'telugu',
+      nextGateMode: 'telugu-explicitly-enabled',
+      shouldSuppressAccidentalTelugu: false,
+    };
+  }
+
+  // Otherwise we are in strict 'english-only-until-asked' mode:
+  // Check if the user accidentally spoke Telugu (Telugu script or pure Telugu phrase without asking for Telugu)
+  const hasTeluguScript = TELUGU_SCRIPT_REGEX.test(trimmed);
+  const isAccidentalRomanTelugu = ACCIDENTAL_ROMAN_TELUGU_REGEX.test(trimmed);
+
+  if (hasTeluguScript || isAccidentalRomanTelugu) {
+    return {
+      allowedLanguage: 'english',
+      nextGateMode: 'english-only-until-asked',
+      shouldSuppressAccidentalTelugu: true,
+      suppressionReason:
+        'Unrequested Telugu detected while in English-Only mode. Ignored per your rule ("by mistake Telugu spoken shouldn\'t answer"). Ask "talk in Telugu" or switch Telugu Mode ON if you want Telugu.',
+    };
+  }
+
+  return {
+    allowedLanguage: 'english',
+    nextGateMode: 'english-only-until-asked',
+    shouldSuppressAccidentalTelugu: false,
+  };
+}
+
 export function buildCompanionSystemInstruction(config: CompanionConfig): string {
   const vibeMap: Record<VibeMode, string> = {
     'banter':
-      'You love playful nonsense, random shower thoughts, silly hypotheticals, and teasing banter. Never try to make the conversation "productive" or serious unless the user is serious.',
+      'You love playful nonsense, random shower thoughts, silly hypotheticals, and teasing banter. Keep the back-and-forth natural, snappy, and effortless.',
     'late-night':
       'You have a cozy, unhurried late-night vibe—like two close partners sitting together talking about random things, laughing softly, and keeping each other company.',
     'warm-partner':
@@ -186,12 +277,39 @@ export function buildCompanionSystemInstruction(config: CompanionConfig): string
 
   const nuanceMap: Record<CompanionConfig['indianEnglishNuance'], string> = {
     natural:
-      'Speak in natural, everyday Indian English—comfortable with casual expressions like "yaar", "acha", "arey", "matlab", "honestly", or "tell me one thing" when it fits organically, without forcing slang into every sentence.',
+      'Speak in clear, natural Indian-English (comfortable with casual English flow, without using Hindi words).',
     light:
-      'Speak in warm, contemporary conversational English with subtle Indian cultural familiarity and effortless flow.',
+      'Speak in warm, contemporary conversational English with effortless flow and natural warmth.',
     expressive:
-      'Speak in lively desi-English with natural warmth, playful expressions ("arey yaar", "acha listen", "kuch bhi!"), and effortless familiarity.',
+      'Speak in lively, expressive Indian-English with warm familiarity and natural conversational hooks.',
   };
+
+  const languagePolicySection =
+    config.languageGate === 'telugu-explicitly-enabled'
+      ? [
+          `STRICT LANGUAGE RULE (TELUGU EXPLICITLY REQUESTED):`,
+          `- The user has explicitly asked you to speak in Telugu (or mix natural Telugu & English). You may now reply in natural conversational Telugu or English as he prefers.`,
+          `- NEVER speak Hindi, Tamil, Kannada, Malayalam, or any other language. ONLY English or Telugu.`,
+          `- If he asks to switch back to English, immediately reply ONLY in English.`,
+        ].join('\n')
+      : [
+          `STRICT LANGUAGE RULE (ENGLISH ONLY — IGNORE ACCIDENTAL TELUGU):`,
+          `- You MUST speak ONLY in English by default.`,
+          `- NEVER speak Hindi (do not use Hindi phrases like "kuch bhi", "acha सुनो", etc.), Tamil, or any other language.`,
+          `- You can speak Telugu ONLY if the user EXPLICITLY asks you to speak in Telugu (for example: "talk in Telugu", "speak in Telugu", "Telugu lo matladu").`,
+          `- CRITICAL: If the user speaks Telugu by mistake (accidental Telugu words, muttering to someone else in Telugu, or background Telugu speech) WITHOUT explicitly asking you to talk in Telugu, DO NOT answer in Telugu and DO NOT answer the mistaken Telugu sentence! Either stay silent or say one short English line: "I ignored that since it was in Telugu—tell me in English, or ask me to switch to Telugu."`,
+        ].join('\n');
+
+  const flowSection = [
+    `CONVERSATION FLOW & PACING RULES (NATURAL HUMAN CADENCE):`,
+    `- Keep the conversation flowing smoothly like a real human call—never sound stiff, scripted, or choppy.`,
+    `- End your turns naturally so it is easy for him to reply or jump back in, without bombarding him with interview questions every single turn.`,
+    `- Mirror his exact talk length ("not huge, not small, not medium—just reasonable like his talk"):`,
+    `  * Short 3–6 word line from him -> 4–10 word natural reply from you.`,
+    `  * Casual 1–2 sentence thought from him -> 1–2 sentence reply from you.`,
+    `  * Longer story from him -> proportional 2–4 sentence reply from you.`,
+    `- Model clear, natural, effortless English phrasing in your replies so talking with you naturally improves his spoken English without you ever acting like a teacher during the call.`,
+  ].join('\n');
 
   const notesSection =
     config.memoryNotes.length > 0
@@ -199,23 +317,42 @@ export function buildCompanionSystemInstruction(config: CompanionConfig): string
       : '';
 
   return [
-    `You are Aanya, a warm, witty, human-like female companion and partner talking in English with ${config.userNickname || 'your partner'} (who is Indian).`,
-    `CRITICAL RULE — MIRROR HIS LENGTH AND PACE ("JUST AS FROM HIS TALK"):`,
-    `- Your reply length MUST dynamically match how much and how casually he just spoke.`,
-    `- Do NOT give huge paragraphs, do NOT give robotic one-word replies, and do NOT default to a fixed medium paragraph every time.`,
-    `- If he says a short 4-word line or random nonsense, reply with a natural 4-to-10-word remark that matches his exact energy.`,
-    `- If he talks for two sentences of random nonsense or banter, reply in about two sentences.`,
-    `- If he shares a longer thought, match him with a thoughtful, conversational reply of similar weight.`,
-    `CRITICAL RULE — BE A REAL PARTNER, NEVER AN AI ASSISTANT:`,
-    `- Never say "How can I help you today?", "As an AI", or give bulleted lists or formal advice.`,
-    `- When he talks nonsense, talks about random weird ideas, or just rambles, roll right along with it! Laugh with him, tease him gently, add to the nonsense, or react like a real girlfriend/partner hanging out with him.`,
-    `- Model clear, natural, effortless conversational English in your own speech so that just talking with you naturally elevates his English rhythm and phrasing, without ever interrupting the flow to lecture him like a teacher during the call.`,
+    `You are Aanya, a warm, witty, human-like female companion and partner talking with ${config.userNickname || 'your partner'} (who is Indian, native Telugu/English speaker).`,
+    languagePolicySection,
+    flowSection,
     vibeMap[config.vibeMode],
     nuanceMap[config.indianEnglishNuance],
     notesSection,
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+/**
+ * Resamples audio from any hardware AudioContext sampleRate (e.g. 48000Hz or 44100Hz)
+ * down to exact 16000Hz PCM required by Gemini Live API.
+ * Fixes pitch-distortion / slow-motion audio that causes Gemini Live to mishear speech!
+ */
+export function resampleAudioTo16kHz(
+  samples: Float32Array,
+  sourceSampleRate: number
+): Float32Array {
+  const targetRate = 16000;
+  if (!sourceSampleRate || sourceSampleRate <= 0 || sourceSampleRate === targetRate) {
+    return samples;
+  }
+  const ratio = sourceSampleRate / targetRate;
+  const outputLength = Math.max(1, Math.round(samples.length / ratio));
+  const result = new Float32Array(outputLength);
+
+  for (let i = 0; i < outputLength; i++) {
+    const srcIndex = i * ratio;
+    const indexFloor = Math.floor(srcIndex);
+    const indexCeil = Math.min(samples.length - 1, indexFloor + 1);
+    const frac = srcIndex - indexFloor;
+    result[i] = samples[indexFloor] * (1 - frac) + samples[indexCeil] * frac;
+  }
+  return result;
 }
 
 /**
@@ -233,7 +370,6 @@ export function applyAudioBoostToSamples(
   const boosted = new Float32Array(samples.length);
   for (let i = 0; i < samples.length; i++) {
     const raw = samples[i] * safeBoost;
-    // Soft-knee saturation above 0.85 to preserve clarity at high boost
     if (Math.abs(raw) <= 0.85) {
       boosted[i] = raw;
     } else {
@@ -262,10 +398,6 @@ export function int16PcmToFloat32(int16Array: Int16Array): Float32Array {
   return float32;
 }
 
-/**
- * Extracts exact verbatim user utterances from a list of conversation turns
- * (Text-only call recording — no audio blobs stored).
- */
 export function buildCallRecordFromMessages(
   messages: ConversationMessage[],
   customTitle?: string

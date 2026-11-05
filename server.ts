@@ -40,9 +40,25 @@ async function startServer() {
   wss.on('connection', (clientWs: WebSocket, request) => {
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
     const initialVoice = url.searchParams.get('voice') === 'Zephyr' ? 'Zephyr' : 'Kore';
+    const initialGate =
+      url.searchParams.get('languageGate') === 'telugu-explicitly-enabled'
+        ? 'telugu-explicitly-enabled'
+        : 'english-only-until-asked';
 
     let sessionPromise: Promise<any> | null = null;
     let isClosed = false;
+    let languageGate: 'english-only-until-asked' | 'telugu-explicitly-enabled' = initialGate;
+    let suppressCurrentTurn = false;
+    let currentTurnInputAcc = '';
+
+    const EXPLICIT_TELUGU_RE =
+      /\b(talk|speak|reply|answer|chat|switch|converse)\b.*\b(in\s+)?telugu\b|\btelugu\s+(lo|la)\s+(matladu|matladandi|cheppu|cheppandi)\b|\bcan\s+you\s+(speak|talk)\s+telugu\b|\btelugu\s+please\b/i;
+    const EXPLICIT_ENGLISH_RE =
+      /\b(talk|speak|reply|answer|switch|back)\b.*\b(in\s+|to\s+)?english\b|\bonly\s+english\b|\benglish\s+only\b/i;
+    const TELUGU_SCRIPT_RE = /[\u0C00-\u0C7F]/;
+    const OTHER_INDIC_SCRIPT_RE = /[\u0900-\u0BFF\u0C80-\u0D7F]/; // Hindi/Devanagari, Tamil, Kannada, Malayalam
+    const ACCIDENTAL_ROMAN_TELUGU_RE =
+      /^\s*(em\s+chestunnav|ela\s+unnav|enti\s+sangati|cheppu\s+ra|em\s+ledu|avuna|sare\s+le|ekkada\s+unnav|bojanam\s+chesava)(\s+ra|\s+amma|\s+babu)?\s*[?.!]*$/i;
 
     const sendSafe = (payload: Record<string, unknown>) => {
       if (!isClosed && clientWs.readyState === WebSocket.OPEN) {
@@ -72,34 +88,81 @@ async function startServer() {
           },
           callbacks: {
             onopen: () => {
-              sendSafe({ type: 'ready', voiceName, model: 'gemini-3.8-live' });
+              sendSafe({ type: 'ready', voiceName, model: 'gemini-3.8-live', languageGate });
             },
             onmessage: (message: LiveServerMessage) => {
               const content = message.serverContent;
               if (!content) return;
 
               if (content.inputTranscription?.text) {
+                const chunkText = content.inputTranscription.text;
+                currentTurnInputAcc += chunkText;
+
+                // Check if user explicitly requested Telugu or English by voice
+                if (EXPLICIT_ENGLISH_RE.test(currentTurnInputAcc)) {
+                  languageGate = 'english-only-until-asked';
+                  suppressCurrentTurn = false;
+                  sendSafe({ type: 'languageGateChanged', languageGate });
+                } else if (EXPLICIT_TELUGU_RE.test(currentTurnInputAcc)) {
+                  languageGate = 'telugu-explicitly-enabled';
+                  suppressCurrentTurn = false;
+                  sendSafe({ type: 'languageGateChanged', languageGate });
+                } else if (languageGate === 'english-only-until-asked') {
+                  // If accidental Telugu script or other non-English script was spoken without asking for Telugu, suppress response!
+                  if (
+                    TELUGU_SCRIPT_RE.test(currentTurnInputAcc) ||
+                    OTHER_INDIC_SCRIPT_RE.test(currentTurnInputAcc) ||
+                    ACCIDENTAL_ROMAN_TELUGU_RE.test(currentTurnInputAcc.trim())
+                  ) {
+                    suppressCurrentTurn = true;
+                    sendSafe({
+                      type: 'suppressedAccidentalTelugu',
+                      text: currentTurnInputAcc.trim(),
+                    });
+                    return;
+                  }
+                }
+
                 sendSafe({
                   type: 'inputTranscript',
-                  text: content.inputTranscription.text,
+                  text: chunkText,
                 });
               }
 
+              if (suppressCurrentTurn) {
+                if (content.turnComplete) {
+                  suppressCurrentTurn = false;
+                  currentTurnInputAcc = '';
+                  sendSafe({ type: 'turnComplete' });
+                }
+                return;
+              }
+
               if (content.outputTranscription?.text) {
+                const outText = content.outputTranscription.text;
+                // Block any accidental Hindi/other script or unrequested Telugu output
+                if (
+                  OTHER_INDIC_SCRIPT_RE.test(outText) ||
+                  (languageGate === 'english-only-until-asked' && TELUGU_SCRIPT_RE.test(outText))
+                ) {
+                  suppressCurrentTurn = true;
+                  sendSafe({ type: 'interrupted' });
+                  return;
+                }
                 sendSafe({
                   type: 'outputTranscript',
-                  text: content.outputTranscription.text,
+                  text: outText,
                 });
               }
 
               for (const part of content.modelTurn?.parts ?? []) {
-                if (part.inlineData?.data) {
+                if (part.inlineData?.data && !suppressCurrentTurn) {
                   sendSafe({
                     type: 'audio',
                     audio: part.inlineData.data,
                   });
                 }
-                if (part.text) {
+                if (part.text && !suppressCurrentTurn) {
                   sendSafe({
                     type: 'modelText',
                     text: part.text,
@@ -112,6 +175,8 @@ async function startServer() {
               }
 
               if (content.turnComplete) {
+                suppressCurrentTurn = false;
+                currentTurnInputAcc = '';
                 sendSafe({ type: 'turnComplete' });
               }
             },
@@ -142,18 +207,34 @@ async function startServer() {
 
         if (msg.type === 'init') {
           const voiceName: 'Kore' | 'Zephyr' = msg.voiceName === 'Zephyr' ? 'Zephyr' : initialVoice;
+          if (
+            msg.languageGate === 'telugu-explicitly-enabled' ||
+            msg.languageGate === 'english-only-until-asked'
+          ) {
+            languageGate = msg.languageGate;
+          }
           const systemInstruction: string =
             typeof msg.systemInstruction === 'string' && msg.systemInstruction.trim()
               ? msg.systemInstruction
-              : 'You are Aanya, a warm, witty Indian-English speaking female partner. Mirror the exact length and casual energy of the user.';
+              : 'You are Aanya, a warm, witty female partner. Speak ONLY in English unless explicitly asked to speak in Telugu. Mirror the exact length and casual energy of the user.';
           await connectLiveSession(voiceName, systemInstruction);
+          return;
+        }
+
+        if (msg.type === 'setLanguageGate') {
+          if (
+            msg.languageGate === 'telugu-explicitly-enabled' ||
+            msg.languageGate === 'english-only-until-asked'
+          ) {
+            languageGate = msg.languageGate;
+          }
           return;
         }
 
         if (!sessionPromise) {
           await connectLiveSession(
             initialVoice,
-            'You are Aanya, a warm, witty Indian-English speaking female partner. Mirror the exact length and casual energy of the user.'
+            'You are Aanya, a warm, witty female partner. Speak ONLY in English unless explicitly asked to speak in Telugu. Mirror the exact length and casual energy of the user.'
           );
         }
 
@@ -192,13 +273,14 @@ async function startServer() {
     });
   });
 
-  // Companion text + voice banter endpoint for instant text or voice-spark turns
+  // Companion text + voice banter endpoint with strict English/Telugu-only-when-asked gate
   app.post('/api/companion/banter', async (req, res) => {
     try {
       const {
         userText,
         systemInstruction,
         voiceName = 'Kore',
+        allowedLanguage = 'english',
         history = [],
         targetMin = 5,
         targetMax = 18,
@@ -215,18 +297,23 @@ async function startServer() {
 
       const recentContext = Array.isArray(history)
         ? history
-            .slice(-6)
+            .slice(-8)
             .map((h: { speaker?: string; text?: string }) =>
               `${h.speaker === 'user' ? 'Partner' : 'Aanya'}: ${h.text || ''}`
             )
             .join('\n')
         : '';
 
+      const languageRule =
+        allowedLanguage === 'telugu'
+          ? `LANGUAGE RULE: He has explicitly asked for Telugu! Reply naturally in conversational Telugu (or smooth Telugu-English mix as fits his sentence). NEVER use Hindi or any other language.`
+          : `LANGUAGE RULE: Reply strictly in 100% natural, clear English ONLY. NEVER use Hindi words (no "yaar", "arey", "acha", "matlab", "kuch bhi") and do NOT use Telugu unless he explicitly asks to speak in Telugu.`;
+
       const prompt = [
         recentContext ? `Recent conversation:\n${recentContext}\n` : '',
         `He just said (${userText.trim().split(/\s+/).length} words): "${userText.trim()}"`,
-        `Reply naturally as Aanya in English (Indian conversational rapport).`,
-        `Match his length and energy: aim for roughly ${targetMin} to ${targetMax} words—not huge, not tiny, not a stiff medium paragraph, just reasonable and human like his talk. Output ONLY what Aanya says aloud.`,
+        languageRule,
+        `FLOW & PACING RULE: Keep the conversation flowing smoothly like a real human partner on a phone call. Connect directly to what he just said, match his exact length and vibe (aim for ${targetMin} to ${targetMax} words—not huge, not tiny, not a stiff paragraph), and output ONLY what Aanya says aloud.`,
       ]
         .filter(Boolean)
         .join('\n');
@@ -237,7 +324,7 @@ async function startServer() {
         config: {
           systemInstruction:
             systemInstruction ||
-            'You are Aanya, a warm, witty Indian-English speaking female partner. Mirror the user length and casual banter.',
+            'You are Aanya, a warm, witty female partner. Speak ONLY in English unless explicitly asked to speak in Telugu. Mirror the user length and keep the conversation flowing naturally.',
         },
       });
 
@@ -257,7 +344,7 @@ async function startServer() {
                     type: 'speech_metadata',
                     style:
                       chosenVoice === 'Zephyr'
-                        ? 'Warm, playful, lively young Indian woman speaking casual conversational English'
+                        ? 'Warm, playful, lively young Indian woman speaking natural conversational English'
                         : 'Warm, grounded, affectionate young Indian woman speaking natural conversational English',
                   },
                 ],
@@ -267,7 +354,7 @@ async function startServer() {
             generation_config: {
               speech_config: [
                 {
-                  language: 'en-IN',
+                  language: allowedLanguage === 'telugu' ? 'te-IN' : 'en-IN',
                   voice: chosenVoice,
                 },
               ],
@@ -285,6 +372,7 @@ async function startServer() {
         replyText,
         wavBase64,
         voiceName: chosenVoice,
+        languageUsed: allowedLanguage === 'telugu' ? 'TE' : 'EN',
       });
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
